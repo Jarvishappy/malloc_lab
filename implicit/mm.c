@@ -23,6 +23,22 @@
 #include "mm.h"
 #include "memlib.h"
 
+/*********************************************************
+ * NOTE TO STUDENTS: Before you do anything else, please
+ * provide your team information in the following struct.
+ ********************************************************/
+team_t team = {
+    /* Team name */
+    "StrikeW",
+    /* First member's full name */
+    "Siyuan",
+    /* First member's email address */
+    "wangsiy3@sysu.mail3.cn",
+    /* Second member's full name (leave blank if none) */
+    "",
+    /* Second member's email address (leave blank if none) */
+    ""
+};
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
