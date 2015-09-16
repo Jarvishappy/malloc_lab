@@ -28,3 +28,9 @@ clean:
 	rm -f *~ *.o mdriver
 
 
+# Push sources to my Linux development machine
+PUSH_CONTENTS=./
+PUSH_DEST=siyuan@centos:projects/malloc_lab/malloclab-handout
+push:
+	rsync -auv --exclude-from=.gitignore $(PUSH_CONTENTS) $(PUSH_DEST)
+

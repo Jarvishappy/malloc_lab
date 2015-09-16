@@ -26,8 +26,8 @@ extern void *mm_realloc(void *ptr, size_t size);
 #define HDRP(bp) ((char*)(bp) - WSIZE)
 #define FTRP(bp) ((char*)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
-#define NEXT_BLKP(bp) ((char*)(bp) + GET_SIZE(HDRP(bp)))
-#define PREV_BLKP(bp) ((char*)(bp) - GET_SIZE((char*)(bp) - DSIZE))
+#define NEXT_BLKP(bp) ( (char*)(bp) + GET_SIZE(HDRP(bp)) )
+#define PREV_BLKP(bp) ( (char*)(bp) - GET_SIZE((char*)(bp) - DSIZE) )
 
 /*
  * Students work in teams of one or two.  Teams enter their team name,

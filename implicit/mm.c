@@ -48,10 +48,20 @@ team_t team = {
 
 static char* heap_listp; /* 指向序言块 */
 
+/**
+ * malloc时寻找一个匹配的空闲块，first fit策略
+ */
 static void *find_fit(size_t size);
+
+/**
+ * 放置分配块
+ */
 static void place(void *bp, size_t asize);
 
 static void *extend_heap(size_t words);
+/**
+ * 合并空闲块, 立即合并
+ */
 static void *coalesce(void *bp);
 
 /*
@@ -142,8 +152,10 @@ void *mm_realloc(void *ptr, size_t size)
     size_t old_size = GET_SIZE(HDRP(ptr));
     size_t new_size = ALIGN(size);
     size_t frag_size;
-    /* if ALIGN(size) > 32 */
+    /* if ALIGN(size) > old_size */
     if (new_size > old_size) {
+
+        /* 这个IF中的逻辑感觉多余了，只需要通过malloc()找到一个更大的空闲块就行了 */
         if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr))) &&
                 GET_SIZE(HDRP(NEXT_BLKP(ptr))) >= (new_size - old_size)) {
             /* next block is large enough, ptr not need to change */
@@ -175,7 +187,7 @@ void *mm_realloc(void *ptr, size_t size)
 
         }
     } else if (new_size < old_size) {
-        /* if ALIGN(size) < 32 */
+        /* if ALIGN(size) < old_size, check if need to split */
         if (old_size - new_size >= MIN_BLK) {
             PUT(HDRP(ptr), PACK(new_size, 1));
             PUT(FTRP(ptr), PACK(new_size, 1));
@@ -229,14 +241,14 @@ static void *coalesce(void *bp)
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
 
+        /* prev block的footer并没被修改，因此PREV_BLKP能正确获取到prev block的地址 */
         bp = PREV_BLKP(bp);
-
 
     } else if (prev_alloc && !next_alloc ) {
         /* 右侧的Block未分配 */
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        PUT(HDRP(bp), PACK(size, 0));
 
     } else {
         /* 左右两侧的Block都未分配 */
@@ -244,9 +256,9 @@ static void *coalesce(void *bp)
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
 
+        /* prev block的footer并没被修改，因此PREV_BLKP能正确获取到prev block的地址 */
         bp = PREV_BLKP(bp);
     }
-
 
     return bp;
 }
