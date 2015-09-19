@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -46,12 +47,23 @@ team_t team = {
 /* rounds up to the nearest multiple of 8 */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
+#define DEBUG 1
+
+#ifdef DEBUG
+#define MM_CHECK() do { if (mm_check() != 0) exit(1); } while(0)
+
+#else
+#define MM_CHECK()
+
+#endif
+
 static char* heap_listp; /* 指向序言块 */
+static char* last_found = NULL;  /* 指向malloc()上一次查找到的位置 */
 
 /**
  * malloc时寻找一个匹配的空闲块，first fit策略
  */
-static void *find_fit(size_t size);
+static void *find_fit(char *start, size_t size);
 
 /**
  * 放置分配块
@@ -64,13 +76,59 @@ static void *extend_heap(size_t words);
  */
 static void *coalesce(void *bp);
 
+static int mm_check(void);
+
+static int is_epilogue(void *bp)
+{
+    /* return GET_SIZE(HDRP(bp)) == 0 && GET_ALLOC(HDRP(bp)); */
+    return 1 == GET(HDRP(bp));
+}
+
+static int mm_check(void)
+{
+    /* 从序言块开始遍历到结语块 */
+    char *bp, *evil;
+    unsigned byte;
+    int i, size, alloc;
+    for (bp = heap_listp, i = 0; !is_epilogue(bp); bp = NEXT_BLKP(bp), i++) {
+        byte = GET(HDRP(bp));
+        if (byte <= 1) {
+            printf("invalid block header: bp=%p, index=%d, header=0x%x\n", bp, i, byte);
+
+            evil = bp;
+            printf("block from heap_listp:\n");
+            for (bp = heap_listp; bp != evil; bp = NEXT_BLKP(bp)) {
+                size = GET_SIZE(HDRP(bp));
+                alloc = GET_ALLOC(HDRP(bp));
+                printf("[hdr:0x%x(%d)|%d, bp:%p, ftr:0x%x(%d)|%d]->", size, size, alloc, bp,
+                        GET_SIZE(FTRP(bp)), GET_SIZE(FTRP(bp)), GET_ALLOC(FTRP(bp)));
+            }
+            printf("\n");
+
+
+            return 0;
+        }
+        byte = GET(FTRP(bp));
+        if (byte <= 1) {
+            printf("invalid block footer: bp=%p, index=%d, footer=0x%x\n", bp, i, byte);
+            return 0;
+        }
+    }
+
+    printf("mm_check ok!\n");
+
+
+    return 1;
+}
+
+
 /*
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
     /* 初始化heap */
-    mem_init();
+    /* mem_init(); */
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void*) -1) {
         fprintf(stderr, "initialize memory allocator fail\n");
         return -1;
@@ -106,7 +164,7 @@ void *mm_malloc(size_t size)
     size_t asize = ALIGN(size + DSIZE);
     void *bp;
     size_t expandsize;
-    if ((bp = find_fit(asize)) != NULL) {
+    if ((bp = find_fit(last_found, asize)) != NULL) {
     } else {
         /* cannot find fit block in free list, ask kernel for more vm */
         expandsize = MAX(asize, CHUNKSIZE);
@@ -115,6 +173,8 @@ void *mm_malloc(size_t size)
     }
 
     place(bp, asize);
+    /* record the free block we found */
+    last_found = NEXT_BLKP(bp);
     return bp;
 }
 
@@ -125,81 +185,102 @@ void mm_free(void *ptr)
 {
     char *bp = ptr;
     size_t size;
+    if (!GET_ALLOC(HDRP(bp)))
+        return;
+
     if (heap_listp < bp && bp < (char*)mem_heap_hi()) {
-        if (GET_ALLOC(HDRP(bp))) {
-            size = GET_SIZE(HDRP(bp));
-            PUT(HDRP(bp), PACK(size, 0));
-            PUT(FTRP(bp), PACK(size, 0));
-            coalesce(bp);
-        }
+        size = GET_SIZE(HDRP(bp));
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(bp), PACK(size, 0));
+        /* 此处调用了coalesce()之后必须要更新last_found，
+         * 否则last_found指向的仍然是merge之前的block */
+        last_found = coalesce(bp);
+
     }
 }
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  * 重新调整之前malloc分配的block的大小
+ * TODO: 改用next_fid策略后，好像这里就死循环了
  */
-void *mm_realloc(void *ptr, size_t size)
+void *mm_realloc(void *bp, size_t size)
 {
-    if (ptr == NULL)
+    if (bp == NULL)
         return mm_malloc(size);
     else if (0 == size) {
-        mm_free(ptr);
+        mm_free(bp);
         return NULL;
     }
 
+    /* check if bp is aliged */
+    if ((uint32_t)bp % ALIGNMENT != 0)
+        return NULL;
+
     void *new_bp = NULL;
-    size_t old_size = GET_SIZE(HDRP(ptr));
-    size_t new_size = ALIGN(size);
+    size_t old_size = GET_SIZE(HDRP(bp));
+    size_t new_size = ALIGN(size + DSIZE); /* 别忘了header和footer的size! */
     size_t frag_size;
-    /* if ALIGN(size) > old_size */
     if (new_size > old_size) {
+        /*
+         * 这个IF中的逻辑感觉多余了，只需要通过malloc()找到一个更大的空闲块就行了.
+         *
+         * 2015-9-18
+         * 通过malloc()重新给找一个更大的block是可以，但是我这implicit的实现，每次
+         * 都要遍历所有的block寻找free block，效率非常低
+         * */
 
-        /* 这个IF中的逻辑感觉多余了，只需要通过malloc()找到一个更大的空闲块就行了 */
-        if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr))) &&
-                GET_SIZE(HDRP(NEXT_BLKP(ptr))) >= (new_size - old_size)) {
-            /* next block is large enough, ptr not need to change */
-            frag_size = GET_SIZE(HDRP(NEXT_BLKP(ptr))) - (new_size - old_size);
+        /**
+         * 判断相邻的下一块是否是一个足以容纳(new_size - old_size)的空闲块，
+         * 如果是，那么就把当前块扩展到下一块就好了
+         */
+        if (!GET_ALLOC(HDRP(NEXT_BLKP(bp))) &&
+                GET_SIZE(HDRP(NEXT_BLKP(bp))) >= (new_size - old_size)) {
+             /* next block is large enough, bp not need to change */
+
+            frag_size = GET_SIZE(HDRP(NEXT_BLKP(bp))) - (new_size - old_size);
+
             if (frag_size >= MIN_BLK) {
-                PUT(HDRP(ptr), PACK(new_size, 1));
-                PUT(FTRP(ptr), PACK(new_size, 1));
+                PUT(HDRP(bp), PACK(new_size, 1));
+                PUT(FTRP(bp), PACK(new_size, 1));
 
-                PUT(HDRP(NEXT_BLKP(ptr)), PACK(frag_size, 0));
-                PUT(FTRP(NEXT_BLKP(ptr)), PACK(frag_size, 0));
+                PUT(HDRP(NEXT_BLKP(bp)), PACK(frag_size, 0));
+                PUT(FTRP(NEXT_BLKP(bp)), PACK(frag_size, 0));
             } else {
-                new_size = old_size + GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-                PUT(HDRP(ptr), PACK(new_size, 1));
-                PUT(FTRP(ptr), PACK(new_size, 1));
+                new_size = old_size + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+                PUT(HDRP(bp), PACK(new_size, 1));
+                PUT(FTRP(bp), PACK(new_size, 1));
             }
 
-            return ptr;
+            new_bp = bp;
+
         } else {
-            /* next block isn't large enough, ptr need to be pointed to a large region */
-            if ((new_bp = mm_malloc(new_size)) != NULL) {
-                PUT(HDRP(new_bp), PACK(new_size, 1));
-                PUT(FTRP(new_bp), PACK(new_size, 1));
+            /* next block isn't large enough, bp need to be pointed to a large region */
+            if ((new_bp = find_fit(last_found, new_size)) == NULL)
+                new_bp = extend_heap(MAX(new_size, CHUNKSIZE) / WSIZE);
 
-                /* copy payload from old block to new block */
-                memcpy(new_bp, ptr, GET_SIZE(HDRP(ptr)) - DSIZE);
-
-                return new_bp;
-            }
-
+            place(new_bp, new_size);
+            /* copy payload from old block to new block */
+            memcpy(new_bp, bp, old_size - DSIZE);
+            /* free old block */
+            mm_free(bp);
         }
     } else if (new_size < old_size) {
-        /* if ALIGN(size) < old_size, check if need to split */
+        /* if new_size < old_size, check if need to split */
         if (old_size - new_size >= MIN_BLK) {
-            PUT(HDRP(ptr), PACK(new_size, 1));
-            PUT(FTRP(ptr), PACK(new_size, 1));
+            PUT(HDRP(bp), PACK(new_size, 1));
+            PUT(FTRP(bp), PACK(new_size, 1));
             /* split a new free block */
-            PUT(HDRP(NEXT_BLKP(ptr)), PACK(old_size - new_size, 0));
-            PUT(FTRP(NEXT_BLKP(ptr)), PACK(old_size - new_size, 0));
+            PUT(HDRP(NEXT_BLKP(bp)), PACK(old_size - new_size, 0));
+            PUT(FTRP(NEXT_BLKP(bp)), PACK(old_size - new_size, 0));
         }
 
-        return ptr;
+        new_bp = bp;
     }
 
-    return ptr;
+    /* mm_check(); */
+
+    return new_bp;
 }
 
 /**
@@ -263,15 +344,16 @@ static void *coalesce(void *bp)
     return bp;
 }
 
+
 /**
  * 在free list中寻找block size大于等于size的block
  */
-static void *find_fit(size_t size)
+static void *find_fit(char *start, size_t size)
 {
     char *bp;
 
     /* 遍历到结尾块，结尾块的size为0 */
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0 ; bp = NEXT_BLKP(bp)) {
+    for (bp = start == NULL ? heap_listp : start; !is_epilogue(bp); bp = NEXT_BLKP(bp)) {
         if (!GET_ALLOC(HDRP(bp)) && GET_SIZE(HDRP(bp)) >= size)
             return bp;
     }
